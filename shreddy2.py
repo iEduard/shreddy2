@@ -171,16 +171,12 @@ class GpioHandler(threading.Thread):
         """
         Turn on the led
         """
-
-        self.stop_blink()
         io.output(self.ledIndicator, True)
 
     def turn_off_led(self):
         """
         Turn off the led
         """
-
-        self.stop_blink()
         io.output(self.ledIndicator, False)
 
 
