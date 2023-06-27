@@ -48,6 +48,7 @@ import time
 import os
 import string
 from timeit import default_timer as timer
+import RPi.GPIO as io
 
 from enum import Enum
 
@@ -60,8 +61,8 @@ host = ""
 # log
 last_devices = []
 
-# busylight handler
-bl_handler = None
+# led handler
+led_handler = None
 
 # -------------------------------------------------------------------------
 # Device
@@ -142,7 +143,89 @@ class Device:
 # -------------------------------------------------------------------------
 
 
+class GpioHandler(threading.Thread):
+
+    states:dict
+    event:threading.Event
+    ledIndicator:int
+    
+    def __init__(self, ledPort:int):
+
+        self.ledIndicator = ledPort
+
+        io.setmode(io.BCM)
+        io.setup(self.ledIndicator, io.OUT)
+
+        self.states = {}
+        self.event = threading.Event()
+
+
+        led_thread = threading.Thread(target=self.run)
+        led_thread.start()
+
+    def set_status(self, medium, state):
+        self.states[medium] = state
+        self.event.set()
+
+    def turn_on_led(self):
+        """
+        Turn on the led
+        """
+
+        self.stop_blink()
+        io.output(self.ledIndicator, True)
+
+    def turn_off_led(self):
+        """
+        Turn off the led
+        """
+
+        self.stop_blink()
+        io.output(self.ledIndicator, False)
+
+
+    def run(self):
+
+        max_level = DeviceStatus.NONE
+        interval = 1 # Set the blinbking interval to 1 Hz
+
+        while True:
+
+            self.event.wait(None if max_level != DeviceStatus.ERROR else 2)
+            self.event.clear()
+
+            max_level = DeviceStatus.NONE
+            for m in self.states:
+                if self.states[m] > max_level:
+                    max_level = self.states[m]
+
+            print(max_level)
+
+
+            if max_level == DeviceStatus.ERROR:
+                interval = 0.3
+                self.turn_on_led()
+                time.sleep(interval)
+                self.turn_off_led()
+                time.sleep(interval)
+            elif max_level == DeviceStatus.NONE:
+                self.turn_off_led()
+            elif max_level == DeviceStatus.REMOVED:
+                self.turn_off_led()
+            elif max_level == DeviceStatus.INSERTED:
+                pass
+            elif max_level == DeviceStatus.RUNNING:
+                interval = 1
+                self.turn_on_led()
+                time.sleep(interval)
+                self.turn_off_led()
+                time.sleep(interval)
+            elif max_level == DeviceStatus.DONE:
+                self.turn_on_led()
+
+
 class BusylightHandler(threading.Thread):
+
     def __init__(self, busylight):
         self.bl = busylight
         self.states = {}
@@ -341,7 +424,7 @@ def erase_medium(device):
 
     path = device.get_path()
 
-    bl_handler.set_status(path, DeviceStatus.RUNNING)
+    led_handler.set_status(path, DeviceStatus.RUNNING)
 
     num_passes = 3
     patterns = ["0", "255"]
@@ -352,7 +435,7 @@ def erase_medium(device):
         device.set_status(DeviceStatus.RUNNING, f"overwriting pass {i}/{num_passes}")
         if not run_command(["badblocks", "-w", "-p", "1", "-t", patterns[i], path]):
             device.set_error("Erasing failed.")
-            bl_handler.set_status(path, DeviceStatus.ERROR)
+            led_handler.set_status(path, DeviceStatus.ERROR)
             return False
         print(
             "%s - Time for overwrite pass %d was: %.2f s" % (path, i, timer() - start)
@@ -363,7 +446,7 @@ def erase_medium(device):
     device.set_status(DeviceStatus.RUNNING, f"overwriting pass 3/{num_passes}")
     if not run_command(["shred", "-vn", "1", path]):
         device.set_error("Erasing failed.")
-        bl_handler.set_status(path, DeviceStatus.ERROR)
+        led_handler.set_status(path, DeviceStatus.ERROR)
         return False
     print("%s - Time for overwrite pass %d was: %.2f s" % (path, 3, timer() - start))
 
@@ -376,7 +459,7 @@ def erase_medium(device):
     device.set_status(DeviceStatus.RUNNING, "partitioning disk")
     if not run_command(["sudo", "shreddy2-partition.sh", path]):
         device.set_error("Partitioning disk failed")
-        bl_handler.set_status(path, DeviceStatus.ERROR)
+        led_handler.set_status(path, DeviceStatus.ERROR)
         return False
     print(
         "%s - Time for %s was: %.2f s"
@@ -391,7 +474,7 @@ def erase_medium(device):
     # we need to wait.
     if not wait_for_device(fs_device):
         device.set_error(f"Device {fs_device} does not appear")
-        bl_handler.set_status(path, DeviceStatus.ERROR)
+        led_handler.set_status(path, DeviceStatus.ERROR)
         return False
     print("%s - Time for %s was: %.2f s" % (path, "waiting", timer() - start))
 
@@ -400,13 +483,13 @@ def erase_medium(device):
     device.set_status(DeviceStatus.RUNNING, "Creating file system")
     if not run_command(["mkfs.vfat", fs_device]):
         device.set_error("Creating file system failed")
-        bl_handler.set_status(path, DeviceStatus.ERROR)
+        led_handler.set_status(path, DeviceStatus.ERROR)
         return False
     print("%s - Time for %s was: %.2f s" % (path, "mkfs.vfat", timer() - start))
 
     print("+ Completed")
     device.set_status(DeviceStatus.DONE, "done")
-    bl_handler.set_status(path, DeviceStatus.DONE)
+    led_handler.set_status(path, DeviceStatus.DONE)
 
     return True
 
@@ -442,7 +525,7 @@ def monitor_events():
                     print(f"+ Enqueue erase operation for {device.device_node}")
 
                     dev = Device(device.device_node, device.properties["ID_MODEL"])
-                    bl_handler.set_status(dev.get_path(), DeviceStatus.INSERTED)
+                    led_handler.set_status(dev.get_path(), DeviceStatus.INSERTED)
                     last_devices.append(dev)
 
                     t = threading.Thread(target=erase_medium, args=(dev,))
@@ -453,7 +536,7 @@ def monitor_events():
                 if last_devices:
                     for d in reversed(last_devices):
                         if d.get_path() == device.device_node:
-                            bl_handler.set_status(d.get_path(), DeviceStatus.REMOVED)
+                            led_handler.set_status(d.get_path(), DeviceStatus.REMOVED)
                             d.set_status(DeviceStatus.REMOVED, "removed")
 
 
@@ -463,7 +546,7 @@ def monitor_events():
 
 
 def main():
-    global bl_handler
+    global led_handler
 
     # First check if required commands are available. Therefore, we
     # run them in a safe manor and check what the return code is.
@@ -473,26 +556,13 @@ def main():
             ["parted", "-v"],
             # ['badblocks'],
             ["mkfs.vfat", "--help"],
-        ]
-    ):
+        ]):
+
         # When a command is not available, we stop
         return False
     else:
 
-        try:
-            from pybusylight import pybusylight
-
-            bl = pybusylight.busylight()
-        except ImportError:
-            # Library is not present
-            bl = None
-            pass
-        except ValueError:
-            # Device is not present
-            bl = None
-            pass
-
-        bl_handler = BusylightHandler(bl)
+        led_handler = GpioHandler(27)
 
         if port is not None:
             print("+ Start TCP server.")
