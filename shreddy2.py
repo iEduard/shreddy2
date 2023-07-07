@@ -187,8 +187,8 @@ class GpioHandler(threading.Thread):
 
         while True:
 
-            self.event.wait(None if max_level != DeviceStatus.ERROR else 2)
-            self.event.clear()
+            #self.event.wait(None if max_level != DeviceStatus.ERROR else 2)
+            #self.event.clear()
 
             max_level = DeviceStatus.NONE
             for m in self.states:
@@ -211,7 +211,7 @@ class GpioHandler(threading.Thread):
             elif max_level == DeviceStatus.INSERTED:
                 pass
             elif max_level == DeviceStatus.RUNNING:
-                interval = 1
+                interval = 0.3
                 self.turn_on_led()
                 time.sleep(interval)
                 self.turn_off_led()
@@ -433,9 +433,7 @@ def erase_medium(device):
             device.set_error("Erasing failed.")
             led_handler.set_status(path, DeviceStatus.ERROR)
             return False
-        print(
-            "%s - Time for overwrite pass %d was: %.2f s" % (path, i, timer() - start)
-        )
+        print("%s - Time for overwrite pass %d was: %.2f s" % (path, i, timer() - start))
 
     start = timer()
     print(f"+ Run pass 3 on {path}")
