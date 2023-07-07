@@ -475,7 +475,7 @@ def erase_medium(device):
     print(f"+ Create file system {path}")
     start = timer()
     device.set_status(DeviceStatus.RUNNING, "Creating file system")
-    if not run_command(["mkfs.vfat", fs_device]):
+    if not run_command(["sudo", "mkfs.vfat", fs_device]):
         device.set_error("Creating file system failed")
         led_handler.set_status(path, DeviceStatus.ERROR)
         return False
