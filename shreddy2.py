@@ -193,9 +193,10 @@ class GpioHandler(threading.Thread):
             max_level = DeviceStatus.NONE
             for m in self.states:
                 if self.states[m] > max_level:
+                    #print(self.states[m])
                     max_level = self.states[m]
 
-            print(max_level)
+            #print(max_level)
 
 
             if max_level == DeviceStatus.ERROR:
@@ -204,6 +205,17 @@ class GpioHandler(threading.Thread):
                 time.sleep(interval)
                 self.turn_off_led()
                 time.sleep(interval)
+                interval = 1
+                self.turn_on_led()
+                time.sleep(interval)
+                self.turn_off_led()
+                time.sleep(interval)
+                interval = 1
+                self.turn_on_led()
+                time.sleep(interval)
+                self.turn_off_led()
+                time.sleep(interval)
+                
             elif max_level == DeviceStatus.NONE:
                 self.turn_off_led()
             elif max_level == DeviceStatus.REMOVED:
