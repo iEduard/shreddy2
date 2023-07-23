@@ -49,7 +49,7 @@ import os
 import string
 from timeit import default_timer as timer
 import RPi.GPIO as io
-
+import json
 from enum import Enum
 
 
@@ -404,6 +404,18 @@ def run_command(command):
         return True
 
 
+def run_command_return_val(command):
+    """
+    Call the command and return the value
+    """
+    try:
+        output = subprocess.run(command, capture_output=True, text=True)
+        return output.stdout
+    except subprocess.CalledProcessError as e:
+        #return f"Error: {e}"
+        return None
+
+
 def check_commands_available(commands):
     for cmd in commands:
         if not run_command(cmd):
@@ -412,52 +424,12 @@ def check_commands_available(commands):
     return True
 
 
-def wait_for_device(path):
-    for retry in range(1, 20):
-        print(f"+ Check device availability {path}")
-        if os.path.exists(path):
-            # Check if we can open the device file
-            try:
-                os.close(os.open(path, os.O_RDONLY))
-                return True
-            except IOError:
-                pass
-        print("+ Wait ...")
-        time.sleep(1)
-    print("+ Device not found")
-    return False
-
-
-def erase_medium(device):
-
-    path = device.get_path()
-
-    led_handler.set_status(path, DeviceStatus.RUNNING)
-
-    num_passes = 3
-    patterns = ["0", "255"]
-
-    for i in range(1, 2):
-        start = timer()
-        print(f"+ Run pass {i} on {path}")
-        device.set_status(DeviceStatus.RUNNING, f"overwriting pass {i}/{num_passes}")
-        if not run_command(["badblocks", "-w", "-p", "1", "-t", patterns[i], path]):
-            device.set_error("Erasing failed.")
-            led_handler.set_status(path, DeviceStatus.ERROR)
-            return False
-        print("%s - Time for overwrite pass %d was: %.2f s" % (path, i, timer() - start))
-
-    start = timer()
-    print(f"+ Run pass 3 on {path}")
-    device.set_status(DeviceStatus.RUNNING, f"overwriting pass 3/{num_passes}")
-    if not run_command(["shred", "-vn", "1", path]):
-        device.set_error("Erasing failed.")
-        led_handler.set_status(path, DeviceStatus.ERROR)
-        return False
-    print("%s - Time for overwrite pass %d was: %.2f s" % (path, 3, timer() - start))
-
+def create_filesystem(device, path):
+    """
+    Create a file system
+    """
+    
     time.sleep(3)
-
     start = timer()
     print(f"+ Partition disk {path}")
     # While 'parted' could be run for the device, it is not able
@@ -487,11 +459,83 @@ def erase_medium(device):
     print(f"+ Create file system {path}")
     start = timer()
     device.set_status(DeviceStatus.RUNNING, "Creating file system")
-    if not run_command(["sudo", "mkfs.vfat", fs_device]):
+    if not run_command(["mkfs.vfat", fs_device]):
         device.set_error("Creating file system failed")
         led_handler.set_status(path, DeviceStatus.ERROR)
         return False
     print("%s - Time for %s was: %.2f s" % (path, "mkfs.vfat", timer() - start))
+
+
+def wait_for_device(path):
+    for retry in range(1, 20):
+        print(f"+ Check device availability {path}")
+        if os.path.exists(path):
+            # Check if we can open the device file
+            try:
+                os.close(os.open(path, os.O_RDONLY))
+                return True
+            except IOError:
+                pass
+        print("+ Wait ...")
+        time.sleep(1)
+    print("+ Device not found")
+    return False
+
+
+def erase_medium(device):
+
+    path = device.get_path()
+
+    led_handler.set_status(path, DeviceStatus.RUNNING)
+
+
+    #Get the current fstype info.
+    no_fs = False
+    ret_val = run_command_return_val(["lsblk", "-J", "-o", "NAME,FSTYPE"])
+    if ret_val is not None:
+                
+        device_info = json.loads(ret_val)
+        device_name = path.split("/")[-1]
+
+        for device_info_entry in device_info["blockdevices"]:
+            if device_info_entry["name"] == device_name:
+                if "children" in device_info_entry:
+
+                    for child in device_info_entry["children"]:
+                        fs_type = child["fstype"]
+                        print(f"Found file system for Device {device_name} type: {fs_type}")                        
+                    print("File System found:")
+
+                else:
+                    #No filesystem availabe... so we need to create it
+                    create_filesystem(device=device, path=path)
+
+
+    num_passes = 3
+    patterns = ["0", "255"]
+
+    for i in range(1, 2):
+        start = timer()
+        print(f"+ Run pass {i} on {path}")
+        device.set_status(DeviceStatus.RUNNING, f"overwriting pass {i}/{num_passes}")
+        if not run_command(["badblocks", "-w", "-p", "1", "-t", patterns[i], path]):
+            device.set_error("Erasing failed.")
+            led_handler.set_status(path, DeviceStatus.ERROR)
+            return False
+        print("%s - Time for overwrite pass %d was: %.2f s" % (path, i, timer() - start))
+
+    start = timer()
+    print(f"+ Run pass 3 on {path}")
+    device.set_status(DeviceStatus.RUNNING, f"overwriting pass 3/{num_passes}")
+    if not run_command(["shred", "-vn", "1", path]):
+        device.set_error("Erasing failed.")
+        led_handler.set_status(path, DeviceStatus.ERROR)
+        return False
+    print("%s - Time for overwrite pass %d was: %.2f s" % (path, 3, timer() - start))
+
+
+    create_filesystem(device=device, path=path)
+    
 
     print("+ Completed")
     device.set_status(DeviceStatus.DONE, "done")
