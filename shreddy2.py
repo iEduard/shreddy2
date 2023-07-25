@@ -51,7 +51,7 @@ from timeit import default_timer as timer
 import RPi.GPIO as io
 import json
 from enum import Enum
-
+import logging
 
 # TCP server port to use (using None disables the server)
 port = 2342
@@ -61,8 +61,6 @@ host = ""
 # log
 last_devices = []
 
-# led handler
-led_handler = None
 
 # -------------------------------------------------------------------------
 # Device
@@ -263,7 +261,7 @@ class BusylightHandler(threading.Thread):
                 if self.states[m] > max_level:
                     max_level = self.states[m]
 
-            print(max_level)
+            #print(max_level)
             if self.bl:
                 if max_level == DeviceStatus.NONE:
                     color = (0, 0, 0)
@@ -381,245 +379,274 @@ class ConnectionHandler(socketserver.StreamRequestHandler):
             time.sleep(5)
 
 
-def create_tcp_server(host, port):
+class shreddy():
 
-    socketserver.TCPServer.allow_reuse_address = True
-    server = socketserver.ThreadingTCPServer((host, port), ConnectionHandler)
+    # Logger
+    logger:logging = None
 
-    t = threading.Thread(target=server.serve_forever)
-    t.start()
+    # led handler
+    led_handler = None
+
+    def create_tcp_server(self, host, port):
+
+        socketserver.TCPServer.allow_reuse_address = True
+        server = socketserver.ThreadingTCPServer((host, port), ConnectionHandler)
+
+        t = threading.Thread(target=server.serve_forever)
+        t.start()
+
+    def create_logger(self, loglevel = logging.DEBUG)->logging:
+        """
+        """
+        pass
+        format="%(asctime)s - %(levelname)s - %(message)s"
+        logging.basicConfig(filename="/var/log/shreddy/shreddy2.log", encoding="utf-8", format=format)
+
+        logger = logging.getLogger()
+
+        logger.setLevel(loglevel)
+        consoleHandler = logging.StreamHandler()
+        consoleHandler.setLevel(loglevel)
+        consoleHandler.setFormatter(logging.Formatter(format))
+        logger.addHandler(consoleHandler)
+
+        return logger
 
 
-# -------------------------------------------------------------------------
-# Shredding part
-# -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Shredding part
+    # -------------------------------------------------------------------------
 
 
-def run_command(command):
-    ret = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if ret.returncode != 0:
-        print(f"+ Command {command} failed with return code {ret.returncode}.")
-        return False
-    else:
+    def run_command(self, command):
+        ret = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if ret.returncode != 0:
+            self.logger.debug(f"+ Command {command} failed with return code {ret.returncode}.")
+            return False
+        else:
+            return True
+
+
+    def run_command_return_val(self, command):
+        """
+        Call the command and return the value
+        """
+        try:
+            output = subprocess.run(command, capture_output=True, text=True)
+            return output.stdout
+        except subprocess.CalledProcessError as e:
+            #return f"Error: {e}"
+            return None
+
+
+    def check_commands_available(self, commands):
+        for cmd in commands:
+            if not self.run_command(cmd):
+                self.logger.debug(f"+ Error: command {cmd[0]} not available.")
+                return False
         return True
 
 
-def run_command_return_val(command):
-    """
-    Call the command and return the value
-    """
-    try:
-        output = subprocess.run(command, capture_output=True, text=True)
-        return output.stdout
-    except subprocess.CalledProcessError as e:
-        #return f"Error: {e}"
-        return None
-
-
-def check_commands_available(commands):
-    for cmd in commands:
-        if not run_command(cmd):
-            print(f"+ Error: command {cmd[0]} not available.")
-            return False
-    return True
-
-
-def create_filesystem(device, path):
-    """
-    Create a file system
-    """
-    
-    time.sleep(3)
-    start = timer()
-    print(f"+ Partition disk {path}")
-    # While 'parted' could be run for the device, it is not able
-    # to inform the kernel about the change.
-    device.set_status(DeviceStatus.RUNNING, "partitioning disk")
-    if not run_command(["sudo", "shreddy2-partition.sh", path]):
-        device.set_error("Partitioning disk failed")
-        led_handler.set_status(path, DeviceStatus.ERROR)
-        return False
-    print(
-        "%s - Time for %s was: %.2f s"
-        % (path, "shreddy2-partition.sh", timer() - start)
-    )
-
-    start = timer()
-    print(f"+ Wait for file system {path} to appear ...")
-    fs_device = f"{path}1"
-
-    # Sometimes the device is not immeditly available and
-    # we need to wait.
-    if not wait_for_device(fs_device):
-        device.set_error(f"Device {fs_device} does not appear")
-        led_handler.set_status(path, DeviceStatus.ERROR)
-        return False
-    print("%s - Time for %s was: %.2f s" % (path, "waiting", timer() - start))
-
-    print(f"+ Create file system {path}")
-    start = timer()
-    device.set_status(DeviceStatus.RUNNING, "Creating file system")
-    if not run_command(["mkfs.vfat", fs_device]):
-        device.set_error("Creating file system failed")
-        led_handler.set_status(path, DeviceStatus.ERROR)
-        return False
-    print("%s - Time for %s was: %.2f s" % (path, "mkfs.vfat", timer() - start))
-
-
-def wait_for_device(path):
-    for retry in range(1, 20):
-        print(f"+ Check device availability {path}")
-        if os.path.exists(path):
-            # Check if we can open the device file
-            try:
-                os.close(os.open(path, os.O_RDONLY))
-                return True
-            except IOError:
-                pass
-        print("+ Wait ...")
-        time.sleep(1)
-    print("+ Device not found")
-    return False
-
-
-def erase_medium(device):
-
-    path = device.get_path()
-
-    led_handler.set_status(path, DeviceStatus.RUNNING)
-
-
-    #Get the current fstype info.
-    no_fs = False
-    ret_val = run_command_return_val(["lsblk", "-J", "-o", "NAME,FSTYPE"])
-    if ret_val is not None:
-                
-        device_info = json.loads(ret_val)
-        device_name = path.split("/")[-1]
-
-        for device_info_entry in device_info["blockdevices"]:
-            if device_info_entry["name"] == device_name:
-                if "children" in device_info_entry:
-
-                    for child in device_info_entry["children"]:
-                        fs_type = child["fstype"]
-                        print(f"Found file system for Device {device_name} type: {fs_type}")                        
-                    print("File System found:")
-
-                else:
-                    #No filesystem availabe... so we need to create it
-                    create_filesystem(device=device, path=path)
-
-
-    num_passes = 3
-    patterns = ["0", "255"]
-
-    for i in range(1, 2):
+    def create_filesystem(self, device, path):
+        """
+        Create a file system
+        """
+        
+        time.sleep(3)
         start = timer()
-        print(f"+ Run pass {i} on {path}")
-        device.set_status(DeviceStatus.RUNNING, f"overwriting pass {i}/{num_passes}")
-        if not run_command(["badblocks", "-w", "-p", "1", "-t", patterns[i], path]):
-            device.set_error("Erasing failed.")
-            led_handler.set_status(path, DeviceStatus.ERROR)
+        self.logger.debug(f"+ Partition disk {path}")
+        # While 'parted' could be run for the device, it is not able
+        # to inform the kernel about the change.
+        device.set_status(DeviceStatus.RUNNING, "partitioning disk")
+        if not self.run_command(["sudo", "shreddy2-partition.sh", path]):
+            device.set_error("Partitioning disk failed")
+            self.led_handler.set_status(path, DeviceStatus.ERROR)
             return False
-        print("%s - Time for overwrite pass %d was: %.2f s" % (path, i, timer() - start))
+        self.logger.debug(
+            "%s - Time for %s was: %.2f s"
+            % (path, "shreddy2-partition.sh", timer() - start)
+        )
 
-    start = timer()
-    print(f"+ Run pass 3 on {path}")
-    device.set_status(DeviceStatus.RUNNING, f"overwriting pass 3/{num_passes}")
-    if not run_command(["shred", "-vn", "1", path]):
-        device.set_error("Erasing failed.")
-        led_handler.set_status(path, DeviceStatus.ERROR)
+        start = timer()
+        self.logger.debug(f"+ Wait for file system {path} to appear ...")
+        fs_device = f"{path}1"
+
+        # Sometimes the device is not immeditly available and
+        # we need to wait.
+        if not self.wait_for_device(fs_device):
+            device.set_error(f"Device {fs_device} does not appear")
+            self.led_handler.set_status(path, DeviceStatus.ERROR)
+            return False
+        self.logger.debug("%s - Time for %s was: %.2f s" % (path, "waiting", timer() - start))
+
+        self.logger.debug(f"+ Create file system {path}")
+        start = timer()
+        device.set_status(DeviceStatus.RUNNING, "Creating file system")
+        if not self.run_command(["mkfs.vfat", fs_device]):
+            device.set_error("Creating file system failed")
+            self.led_handler.set_status(path, DeviceStatus.ERROR)
+            return False
+        self.logger.debug("%s - Time for %s was: %.2f s" % (path, "mkfs.vfat", timer() - start))
+
+
+    def wait_for_device(self, path):
+        for retry in range(1, 20):
+            self.logger.debug(f"+ Check device availability {path}")
+            if os.path.exists(path):
+                # Check if we can open the device file
+                try:
+                    os.close(os.open(path, os.O_RDONLY))
+                    return True
+                except IOError:
+                    pass
+            self.logger.debug("+ Wait ...")
+            time.sleep(1)
+        self.logger.debug("+ Device not found")
         return False
-    print("%s - Time for overwrite pass %d was: %.2f s" % (path, 3, timer() - start))
 
 
-    create_filesystem(device=device, path=path)
-    
+    def erase_medium(self, device):
 
-    print("+ Completed")
-    device.set_status(DeviceStatus.DONE, "done")
-    led_handler.set_status(path, DeviceStatus.DONE)
+        path = device.get_path()
 
-    return True
+        self.led_handler.set_status(path, DeviceStatus.RUNNING)
 
 
-# -------------------------------------------------------------------------
-# Monitoring part
-# -------------------------------------------------------------------------
+        #Get the current fstype info.
+        no_fs = False
+        ret_val = self.run_command_return_val(["lsblk", "-J", "-o", "NAME,FSTYPE"])
+        if ret_val is not None:
+                    
+            device_info = json.loads(ret_val)
+            device_name = path.split("/")[-1]
+
+            for device_info_entry in device_info["blockdevices"]:
+                if device_info_entry["name"] == device_name:
+                    if "children" in device_info_entry:
+
+                        for child in device_info_entry["children"]:
+                            fs_type = child["fstype"]
+                            self.logger.debug(f"Found file system for Device {device_name} type: {fs_type}")                        
+                        self.logger.debug("File System found:")
+
+                    else:
+                        #No filesystem availabe... so we need to create it
+                        self.create_filesystem(device=device, path=path)
 
 
-def monitor_events():
-    monitor = pyudev.Monitor.from_netlink(pyudev.Context())
-    monitor.filter_by(subsystem="block")
+        num_passes = 3
+        patterns = ["0", "255"]
 
-    for action, device in monitor:
+        for i in range(1, 2):
+            start = timer()
+            self.logger.debug(f"+ Run pass {i} on {path}")
+            device.set_status(DeviceStatus.RUNNING, f"overwriting pass {i}/{num_passes}")
+            if not self.run_command(["badblocks", "-w", "-p", "1", "-t", patterns[i], path]):
+                device.set_error("Erasing failed.")
+                self.led_handler.set_status(path, DeviceStatus.ERROR)
+                return False
+            self.logger.debug("%s - Time for overwrite pass %d was: %.2f s" % (path, i, timer() - start))
 
-        if device.device_type == "disk":
+        start = timer()
+        self.logger.debug(f"+ Run pass 3 on {path}")
+        device.set_status(DeviceStatus.RUNNING, f"overwriting pass 3/{num_passes}")
+        if not self.run_command(["shred", "-vn", "1", path]):
+            device.set_error("Erasing failed.")
+            self.led_handler.set_status(path, DeviceStatus.ERROR)
+            return False
+        self.logger.debug("%s - Time for overwrite pass %d was: %.2f s" % (path, 3, timer() - start))
 
-            if device.action == "add":
 
-                print(
-                    "+ Device attached: {0} (dev-type: {1}, id-type: {2}, usb-driver: {3})".format(
-                        device.device_node,
-                        device.device_type,
-                        device.properties["ID_TYPE"],
-                        device.properties["ID_USB_DRIVER"],
+        self.create_filesystem(device=device, path=path)
+        
+
+        self.logger.debug("+ Completed")
+        device.set_status(DeviceStatus.DONE, "done")
+        self.led_handler.set_status(path, DeviceStatus.DONE)
+
+        return True
+
+
+    # -------------------------------------------------------------------------
+    # Monitoring part
+    # -------------------------------------------------------------------------
+
+
+    def monitor_events(self):
+        monitor = pyudev.Monitor.from_netlink(pyudev.Context())
+        monitor.filter_by(subsystem="block")
+
+        for action, device in monitor:
+
+            if device.device_type == "disk":
+
+                if device.action == "add":
+
+                    self.logger.debug(
+                        "+ Device attached: {0} (dev-type: {1}, id-type: {2}, usb-driver: {3})".format(
+                            device.device_node,
+                            device.device_type,
+                            device.properties["ID_TYPE"],
+                            device.properties["ID_USB_DRIVER"],
+                        )
                     )
-                )
 
-                if (
-                    device.properties["ID_TYPE"] == "disk"
-                    and device.properties["ID_USB_DRIVER"] == "usb-storage"
-                ):
-                    print(f"+ Enqueue erase operation for {device.device_node}")
+                    if (
+                        device.properties["ID_TYPE"] == "disk"
+                        and device.properties["ID_USB_DRIVER"] == "usb-storage"
+                    ):
+                        self.logger.debug(f"+ Enqueue erase operation for {device.device_node}")
 
-                    dev = Device(device.device_node, device.properties["ID_MODEL"])
-                    led_handler.set_status(dev.get_path(), DeviceStatus.INSERTED)
-                    last_devices.append(dev)
+                        dev = Device(device.device_node, device.properties["ID_MODEL"])
+                        self.led_handler.set_status(dev.get_path(), DeviceStatus.INSERTED)
+                        last_devices.append(dev)
 
-                    t = threading.Thread(target=erase_medium, args=(dev,))
-                    t.start()
+                        t = threading.Thread(target=self.erase_medium, args=(dev,))
+                        t.start()
 
-            elif device.action == "remove":
-                print("+ Device detached: {}".format(device.device_node))
-                if last_devices:
-                    for d in reversed(last_devices):
-                        if d.get_path() == device.device_node:
-                            led_handler.set_status(d.get_path(), DeviceStatus.REMOVED)
-                            d.set_status(DeviceStatus.REMOVED, "removed")
-
-
-# -------------------------------------------------------------------------
-# Program start
-# -------------------------------------------------------------------------
+                elif device.action == "remove":
+                    self.logger.debug("+ Device detached: {}".format(device.device_node))
+                    if last_devices:
+                        for d in reversed(last_devices):
+                            if d.get_path() == device.device_node:
+                                self.led_handler.set_status(d.get_path(), DeviceStatus.REMOVED)
+                                d.set_status(DeviceStatus.REMOVED, "removed")
 
 
-def main():
-    global led_handler
+    # -------------------------------------------------------------------------
+    # Program start
+    # -------------------------------------------------------------------------
 
-    # First check if required commands are available. Therefore, we
-    # run them in a safe manor and check what the return code is.
-    if not check_commands_available(
-        [
-            ["shred", "--version"],
-            ["parted", "-v"],
-            # ['badblocks'],
-            ["mkfs.vfat", "--help"],
-        ]):
 
-        # When a command is not available, we stop
-        return False
-    else:
+    def run(self):
 
-        led_handler = GpioHandler(27)
+        self.logger = self.create_logger(loglevel=logging.DEBUG)
 
-        if port is not None:
-            print("+ Start TCP server.")
-            create_tcp_server(host, port)
-        print(f"+ Start device monitor. Waiting for devices.")
-        monitor_events()
+
+        # First check if required commands are available. Therefore, we
+        # run them in a safe manor and check what the return code is.
+        if not self.check_commands_available(
+            [
+                ["shred", "--version"],
+                ["parted", "-v"],
+                # ['badblocks'],
+                ["mkfs.vfat", "--help"],
+            ]):
+
+            # When a command is not available, we stop
+            return False
+        else:
+
+            self.led_handler = GpioHandler(27)
+
+            if port is not None:
+                self.logger.debug("+ Start TCP server.")
+                self.create_tcp_server(host, port)
+            self.logger.debug(f"+ Start device monitor. Waiting for devices.")
+            self.monitor_events()
 
 
 if __name__ == "__main__":
-    main()
+    
+    shreddyApp = shreddy()  
+    shreddyApp.run()
